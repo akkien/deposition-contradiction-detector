@@ -12,6 +12,9 @@
   },
   "dependencies": {
     "@google/genai": "^2.9.0",
+    "chrono-node": "^2.9.1",
+    "compromise": "^14.15.1",
+    "natural": "^8.1.1",
     "next": "16.2.9",
     "react": "19.2.4",
     "react-dom": "19.2.4"

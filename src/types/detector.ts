@@ -22,3 +22,19 @@ export interface ResolvedPair {
   llmType: LlmType;
   llm_explanation: string;
 }
+
+export interface NumericDeltaResult {
+  unit: 'time' | 'age' | 'distance' | 'weight' | 'height' | 'money' | 'duration' | 'speed' | 'occurrence' | 'percentage';
+  value: number;
+}
+
+export interface ScoreResult {
+  type: LlmType;
+  confidence: number;
+  breakdown: {
+    lexicalOverlap: number;
+    numericDelta: NumericDeltaResult | null;
+    assertionMin: number;
+    hasScopeWord: boolean;
+  };
+}
