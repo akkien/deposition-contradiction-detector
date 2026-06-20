@@ -2,70 +2,125 @@
 
 ## Goals
 
-### Feature: Pass 3 — Scoring Layer
+### Feature: Results Display
 
-Implement the deterministic scoring layer: pure application code (no LLM) that takes a `ResolvedPair` and the LLM's type hint and returns a final `type`, `confidence`, and `breakdown`. This is the only place confidence scores are produced in the entire pipeline.
+Wire up the full pipeline to the UI and display scored contradictions below the transcript panes.
 
-**Function signature:**
+---
 
-```ts
-function scoreContradiction(pair: ResolvedPair, llmType: LlmType): ScoreResult
-```
-
-**New types (add to `src/types/detector.ts`):**
+#### New types (`src/types/detector.ts`)
 
 ```ts
-interface NumericDeltaResult {
-  unit: 'time' | 'age' | 'distance' | 'weight' | 'height' | 'money' | 'duration' | 'speed' | 'occurrence' | 'percentage'
-  value: number
-}
+export type Severity = 'HIGH' | 'MEDIUM' | 'LOW'
 
-interface ScoreResult {
+export interface ScoredContradiction {
+  topic: string
   type: LlmType
-  confidence: number  // 0–1
-  breakdown: {
-    lexicalOverlap: number
-    numericDelta: NumericDeltaResult | null
-    assertionMin: number
-    hasScopeWord: boolean
-  }
+  confidence: number      // 0–1, from scoring layer
+  severity: Severity      // derived from confidence + type
+  claim1: string          // raw_quote from claim_1 (T1)
+  claim2: string          // raw_quote from claim_2 (T2)
+  explanation: string     // llm_explanation from Pass 2
+  breakdown: ScoreResult['breakdown']
 }
 ```
 
-**Files to create:**
+**Severity derivation** (pure function, no LLM):
+- `type === 'false_positive'` → `LOW`
+- `confidence >= 0.7` → `HIGH`
+- `confidence >= 0.4` → `MEDIUM`
+- else → `LOW`
 
-- `src/lib/detector/scoring.ts` — `scoreContradiction()` and four sub-functions:
-  - `calcLexicalOverlap(pair)` — stemmed word overlap via `natural`
-  - `calcNumericDelta(pair)` — typed numeric delta via `chrono-node` + `compromise`
-  - `calcAssertionStrength(text)` — hedge/strong word scoring, no library
-  - `detectScopeQualifier(text)` — absolute scope word detection, no library
-- `src/lib/detector/__tests__/scoring.test.ts` — unit tests (no mocks needed, all pure functions)
+---
 
-**Scoring logic (priority order):**
+#### Color constants (`src/lib/colors.ts`)
 
-1. If `numericDelta` exists → apply unit-aware thresholds (`UNIT_THRESHOLDS`):
-   - `value < small` → `false_positive`, confidence 0.9
-   - `value < medium` → `inferential`, confidence 0.7
-   - `value ≥ medium` → fall through
-2. If scope qualifier (`all`, `never`, `always`, etc.) → `direct`, confidence = `assertionMin * 0.9 + 0.1`
-3. Otherwise → trust `llmType`, confidence = `assertionMin * 0.6 + lexicalOverlap * 0.4`
+```ts
+export const TYPE_COLORS: Record<LlmType, string> = {
+  direct:         '#ef4444',
+  inferential:    '#f59e0b',
+  false_positive: '#9ca3af',
+}
 
-**Libraries to install:** `chrono-node`, `compromise`, `natural`
+export const SEVERITY_COLORS: Record<Severity, string> = {
+  HIGH:   '#1b5e20',
+  MEDIUM: '#2e7d32',
+  LOW:    '#4caf50',
+}
+```
 
-**Tests (all pure — no mocks):**
+---
 
-- `calcLexicalOverlap`: stemmed overlap, synonym-insensitive, handles empty strings
-- `calcNumericDelta`: time expressions (chrono), age/distance/weight (compromise), returns null when no numeric signal
-- `calcAssertionStrength`: hedge words lower score, strong words raise it, clamps to 0–1
-- `detectScopeQualifier`: detects `never`/`all`/`always` etc., word-boundary matched
-- `scoreContradiction`: numeric path (each unit type), scope path, fallback path, confidence range 0–1
+#### Pipeline orchestrator (`src/lib/detector/pipeline.ts`)
 
-## Notes
+`runPipeline(t1: TranscriptData, t2: TranscriptData): Promise<ScoredContradiction[]>`
 
-- All sub-functions exported for direct testing
-- `UNIT_THRESHOLDS` exported as a constant so tests can reference it
+Runs Pass 1 (parallel for T1 and T2) → Pass 2 → `resolvePairs` → `scoreContradiction` for each pair → derives severity → returns `ScoredContradiction[]`. Called only from the API route.
+
+---
+
+#### API route (`src/app/api/analyze/route.ts`)
+
+- `POST /api/analyze`
+- Body: `{ witnessName: string, transcript1: TranscriptData, transcript2: TranscriptData }`
+- Calls `runPipeline`, returns `{ contradictions: ScoredContradiction[] }`
+- On error: returns `{ error: string }` with appropriate HTTP status
+- Never exposes raw transcript text or LLM responses in error messages
+
+---
+
+#### UI components
+
+**`src/components/results/ContradictionCard.tsx`**
+
+Props: `contradiction: ScoredContradiction`, `isSelected: boolean`, `date1: string`, `date2: string`, `onClick: () => void`
+
+Layout (matches prototype):
+- Left border colored by type (`TYPE_COLORS[type]`)
+- Header row: type badge (uppercase, background tinted by type color) + severity badge (text colored by `SEVERITY_COLORS[severity]`) + topic label + confidence percentage
+- Body: `date1:` label + `claim1` quote, then `date2:` label + `claim2` quote
+- Collapsed by default; clicking expands to show `explanation` and score breakdown
+
+**`src/components/results/ContradictionList.tsx`**
+
+Props: `contradictions: ScoredContradiction[]`, `selectedId: number | null`, `onSelect: (i: number | null) => void`, `date1: string`, `date2: string`
+
+- Count header: "Results (N found)" — "No contradictions found" if empty
+- Filter row: type pills (ALL / DIRECT / INFERENTIAL / FALSE_POSITIVE) + severity pills (ALL / HIGH / MEDIUM / LOW)
+- Sort toggle: by confidence (default, HIGH first) or by topic (A–Z)
+- Renders filtered/sorted `ContradictionCard` list
+
+---
+
+#### `TranscriptInputPage` changes
+
+New state:
+- `results: ScoredContradiction[] | null` — null = not yet analyzed
+- `selectedIdx: number | null` — which card is expanded/active
+- `mode: 'input' | 'results'` — controls which view is shown
+
+Flow:
+1. **Input mode**: existing UI (witness name, two transcript panels, button)
+2. Button click → `handleAnalyze` → POST `/api/analyze` → on success: `setResults(...)`, `setMode('results')`
+3. **Results mode**: show transcript panes (read-only, with active quote highlighted) + `ContradictionList` below; show "Edit Transcripts" button that resets to input mode
+
+**Transcript quote highlighting** (in results mode):
+
+Replace the `<textarea>` in each `TranscriptPanel` with a read-only `<pre>` that splits the transcript text around the active `raw_quote` substring and wraps the matching segment in a `<mark>` styled with a light tint of `TYPE_COLORS[type]`. If the quote is not found as an exact substring, render the transcript without highlight (graceful fallback).
+
+---
+
+#### What is NOT in this feature
+
+- No server actions — this feature uses an API route (long-running, needs specific status codes)
+- No transcript edit after results (that is a separate future feature listed in the spec)
+- No export
 
 ## History
+
+### Pass 3 — Scoring Layer — completed 2026-06-20
+
+Implemented the deterministic scoring layer (`scoreContradiction`): no LLM calls, pure application code. Four sub-functions (`calcLexicalOverlap`, `calcNumericDelta`, `calcAssertionStrength`, `detectScopeQualifier`) feed into a priority-ordered scoring pipeline — numeric delta first (unit-aware thresholds via `UNIT_THRESHOLDS`), then scope qualifiers, then LLM type fallback. Added `NumericDeltaResult` and `ScoreResult` types. 32 unit tests (all pure, no mocks) plus a full pipeline integration test (Pass 1 → Pass 2 → Pass 3, skipped without API key). Libraries: `chrono-node`, `natural`.
 
 ### Pass 2 — Candidate Pairing — completed 2026-06-20
 

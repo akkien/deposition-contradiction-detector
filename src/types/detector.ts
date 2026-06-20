@@ -38,3 +38,16 @@ export interface ScoreResult {
     hasScopeWord: boolean;
   };
 }
+
+export type Severity = 'HIGH' | 'MEDIUM' | 'LOW'
+
+export interface ScoredContradiction {
+  topic: string;
+  type: LlmType;
+  confidence: number;
+  severity: Severity;
+  claim1: string;       // raw_quote from claim_1 (T1)
+  claim2: string;       // raw_quote from claim_2 (T2)
+  explanation: string;
+  breakdown: ScoreResult['breakdown'];
+}
