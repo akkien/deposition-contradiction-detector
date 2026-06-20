@@ -375,12 +375,86 @@ This table is intentionally explicit and editable — if the legal domain calls 
 
 ### Sub-functions used inside `scoreContradiction`
 
-| Function | Signature | Purpose |
-|---|---|---|
-| `calcLexicalOverlap(pair)` | `(pair: Pair) => number` | Stemmed word overlap (via `natural`) between `claim_1.text` and `claim_2.text` |
-| `calcNumericDelta(pair)` | `(pair: Pair) => NumericDeltaResult \| null` | Detects a comparable numeric value pair (time, age, distance, weight, or height) and returns its unit + delta, or `null` if no comparable numeric signal exists |
-| `calcAssertionStrength(text)` | `(text: string) => number` | 0–1 score; lowered by hedge words, raised by strong/absolute words |
-| `detectScopeQualifier(text)` | `(text: string) => boolean` | True if text contains an absolute scope word |
+#### `calcLexicalOverlap(pair)` → number (0–1)
+
+**Question it answers:** How many words do the two claims share?
+
+Uses **Porter Stemmer** to reduce words to their root form before comparing: `"drove"`, `"driving"`, `"drive"` → all become stem `"driv"`. Then counts shared stems divided by the larger stem set.
+
+```
+claim_1: "I drove to the office"   → stems: {driv, offic}
+claim_2: "He was driving downtown" → stems: {driv, downtown}
+intersection: {driv} → overlap = 1/3 ≈ 0.33
+```
+
+**Role in confidence:** Low overlap → the two claims are about different things → contradiction may be weaker. High overlap → same subject → contradiction is clearer. Only participates in confidence calculation at the fallback step (step 3) — never decides `type` on its own.
+
+---
+
+#### `calcNumericDelta(pair)` → `{ unit, value }` | null
+
+**Question it answers:** Do both claims contain a comparable number, and how far apart are they?
+
+Runs in two steps:
+
+1. `chrono-node` tries to parse time/date expressions first (`"around 7pm"`, `"midnight"`)
+2. If no time found, regex + `UNIT_TYPE_MAP` extracts quantity + unit (`"30 years old"`, `"5km"`)
+
+```text
+claim_1: "I slept at 10pm"    → chrono: 22:00
+claim_2: "I slept at midnight" → chrono: 00:00
+→ { unit: "time", value: 120 }  (120 minutes apart)
+```
+
+Returns `null` if no comparable numeric signal exists in either claim.
+
+**Role in confidence:** The only sub-function that can **completely override** the LLM's suggestion — small delta → `false_positive`, medium delta → `inferential`, large delta → falls through to step 2. It is checked first because math is the most objective, hardest-to-dispute signal.
+
+---
+
+#### `calcAssertionStrength(text)` → number (0–1)
+
+**Question it answers:** How confident is the speaker — are they certain or hedging?
+
+```ts
+// Starts at 0.5 (neutral)
+// +0.25 per strong word: "never", "always", "definitely", "certainly"
+// −0.20 per hedge word:  "maybe", "think", "probably", "i guess"
+```
+
+```text
+"I definitely never went there"  → 0.5 + 0.25 + 0.25 = 1.0  (very certain)
+"I think I maybe went there"     → 0.5 − 0.20 − 0.20 = 0.1  (very uncertain)
+```
+
+Inside `scoreContradiction`, this is applied to **both** claims and takes the **minimum** (`assertionMin`). The logic: if either speaker is hedging, the contradiction as a whole is less reliable — a statement like `"I think maybe..."` carries much less evidentiary weight than a flat assertion.
+
+**Role in confidence:** Participates in confidence at steps 2 and 3. In step 2 (scope word fires): `confidence = assertionMin × 0.9 + 0.1`. In step 3 (fallback): `confidence = assertionMin × 0.6 + lexicalOverlap × 0.4`.
+
+---
+
+#### `detectScopeQualifier(text)` → boolean
+
+**Question it answers:** Does the claim use an absolute word that leaves no room for exceptions?
+
+Checks for: `all`, `every`, `never`, `always`, `only`, `none`, `nobody`, `everyone`. Uses word-boundary regex (`\bword\b`) to avoid false matches — `"overall"` does not match `"all"`, `"everything"` does not match `"every"`.
+
+```text
+"I never went there"      → true  ("never" matched)
+"I rarely went there"     → false (no scope word)
+"I covered everything"    → false ("every" boundary not matched inside "everything")
+```
+
+**Role in confidence:** Scope words matter in legal testimony because they are absolute commitments — `"never"` means not once, ever. If one claim uses `"never"` and the other proves otherwise, that is almost always a `direct` contradiction. This rule fires **after** numeric delta but **before** the fallback, so it can override `false_positive` or `inferential` suggestions from the LLM.
+
+---
+
+| Function | Signature | Decides `type`? | Contributes to `confidence`? |
+| --- | --- | --- | --- |
+| `calcLexicalOverlap` | `(pair: Pair) => number` | No | Yes — step 3 fallback only |
+| `calcNumericDelta` | `(pair: Pair) => NumericDeltaResult \| null` | Yes — steps 1 (small/medium) | Implicitly via fixed values (0.9, 0.7) |
+| `calcAssertionStrength` | `(text: string) => number` | No | Yes — steps 2 and 3 |
+| `detectScopeQualifier` | `(text: string) => boolean` | Yes — step 2 | No (triggers step 2 formula) |
 
 Full implementations of these four functions, plus the `UNIT_THRESHOLDS` table they depend on, are shown together in the **Libraries** section below — that's where their library dependencies are introduced.
 
@@ -441,23 +515,35 @@ function calcNumericDelta(pair: Pair): NumericDeltaResult | null {
 
 // Maps raw unit words to a normalized unitType category
 const UNIT_TYPE_MAP: Record<string, string> = {
-  year: "age", years: "age", "years old": "age",
+  "years old": "age", year: "age", years: "age",
   km: "distance", kilometer: "distance", kilometers: "distance",
-  mile: "distance", miles: "distance", m: "distance", meter: "distance",
-  kg: "weight", kilogram: "weight", lb: "weight", lbs: "weight", pound: "weight", pounds: "weight",
-  cm: "height", ft: "height", feet: "height", inch: "height", inches: "height",
+  mile: "distance", miles: "distance", meter: "distance", meters: "distance",
+  kg: "weight", kilogram: "weight", kilograms: "weight",
+  lb: "weight", lbs: "weight", pound: "weight", pounds: "weight",
+  cm: "height", ft: "height", feet: "height", foot: "height", inch: "height", inches: "height",
+  dollar: "money", dollars: "money", "$": "money", usd: "money",
+  minute: "duration", minutes: "duration", min: "duration", mins: "duration",
+  hour: "duration", hours: "duration", hr: "duration", hrs: "duration",
+  mph: "speed", kmh: "speed", "km/h": "speed", kph: "speed",
+  times: "occurrence", occasion: "occurrence", occasions: "occurrence",
+  percent: "percentage", "%": "percentage",
 };
 
-function extractQuantity(text: string): { value: number; unitType: string } | null {
-  const doc = nlp(text);
-  const values = doc.numbers().json(); // e.g. [{ number: 30, ... }]
-  if (values.length === 0) return null;
+function extractNumbers(text: string): number[] {
+  const matches = text.match(/\b\d+(?:\.\d+)?\b/g);
+  return matches ? matches.map(Number).filter((n) => !isNaN(n)) : [];
+}
 
-  // Look for a unit word near the number (simple window match)
+function extractQuantity(text: string): { value: number; unitType: string } | null {
+  const numbers = extractNumbers(text);
+  if (numbers.length === 0) return null;
+
   const lower = text.toLowerCase();
-  for (const [unitWord, unitType] of Object.entries(UNIT_TYPE_MAP)) {
+  // longest match first to prefer "years old" over "years"
+  const unitWords = Object.keys(UNIT_TYPE_MAP).sort((a, b) => b.length - a.length);
+  for (const unitWord of unitWords) {
     if (lower.includes(unitWord)) {
-      return { value: values[0].number, unitType };
+      return { value: numbers[0], unitType: UNIT_TYPE_MAP[unitWord] };
     }
   }
   return null;
@@ -482,11 +568,16 @@ function detectScopeQualifier(text: string): boolean {
 
 // Per-unit thresholds — see "Why thresholds must be unit-aware" above
 const UNIT_THRESHOLDS: Record<NumericDeltaResult["unit"], { small: number; medium: number }> = {
-  time:     { small: 15, medium: 60 },   // minutes
-  age:      { small: 1,  medium: 3 },     // years
-  distance: { small: 0.5, medium: 5 },    // km
-  weight:   { small: 1,  medium: 5 },     // kg
-  height:   { small: 1,  medium: 3 },     // cm
+  time:       { small: 15,  medium: 60  },  // minutes — a few min is rounding; 1hr+ is a real gap
+  age:        { small: 1,   medium: 3   },  // years — people rarely misstate age by rounding alone
+  distance:   { small: 0.5, medium: 5   },  // km — sub-500m is "near"; several km is a different place
+  weight:     { small: 1,   medium: 5   },  // kg — daily fluctuation vs a real discrepancy
+  height:     { small: 1,   medium: 3   },  // cm — height is stable; >3cm is odd
+  money:      { small: 50,  medium: 500 },  // dollars — small amounts are rounding; large gaps suggest different transactions
+  duration:   { small: 5,   medium: 30  },  // minutes (event length) — "a few minutes" vs "half an hour"
+  speed:      { small: 5,   medium: 20  },  // mph/kmh — under 5 is estimation error; 20+ changes the narrative
+  occurrence: { small: 1,   medium: 3   },  // count — off-by-one is human; off-by-3+ suggests fabrication
+  percentage: { small: 2,   medium: 10  },  // % points — 2pp is rounding; 10pp+ changes ownership/liability claims
 };
 
 function scoreContradiction(pair: Pair, llmType: LlmType): ScoreResult {
