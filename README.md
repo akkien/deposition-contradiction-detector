@@ -1,36 +1,46 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Deposition Contradiction Detector
 
-## Getting Started
+A web application that helps legal professionals detect contradictions between deposition transcripts from the same witness. Paste two transcripts, click **Find Contradictions**, and get a structured, scored list of inconsistencies — color-coded by type and severity.
 
-First, run the development server:
+## How it works
+
+1. **Input** — paste two transcripts with witness name and date for each.
+2. **Analysis** — the app sends the transcripts through a three-pass pipeline: claim extraction (LLM), claim pairing (LLM), and deterministic scoring (application code — no LLM).
+3. **Results** — contradictions are displayed with type, severity, confidence score, relevant quotes, and an explanation. Click any contradiction to highlight the matching quotes in both transcripts.
+
+### Input
+
+![Input UI](docs/images/input-ui.png)
+
+### Results
+
+![Output UI](docs/images/output-ui.png)
+
+## Contradiction types
+
+| Type | Color | Meaning |
+| --- | --- | --- |
+| `DIRECT` | Red | One claim directly negates the other |
+| `INFERENTIAL` | Amber | Both claims could be true alone but cannot both hold simultaneously |
+| `FALSE_POSITIVE` | Gray | Likely imprecise language, not a real conflict |
+
+## Run
 
 ```bash
-npm run dev
-# or
 yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Requires a `GEMINI_API_KEY` in `.env`:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```env
+GEMINI_API_KEY=your_key_here
+```
 
-## Learn More
+## Build
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+yarn build
+yarn start
+```

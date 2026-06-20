@@ -177,7 +177,17 @@ The application allow users to input two deposition of a person.
 
 ## 10. Remain Features
 
-- **Upload:** PDF/DOCX upload transcripts.
-- **Export:** Export contradiction report as PDF or DOCX for use in case files or cross-examination prep.
-- **Multiple transcripts analysis:** Find contradiction among multiple transcripts
-- **Authentication:** allow user to register, save transcripts as well as analyze result.
+- **PDF/DOCX upload:** — upload transcripts instead of pasting
+- **Export:** — download contradiction report as PDF/DOCX
+- **Multiple transcripts:** — find contradictions across more than 2 transcripts
+- **Authentication:** — user accounts, saved transcripts and results
+
+## 11. Improvements
+
+Use legal or deposition-specific fine-tuning AI models for detection
+
+| Model | Strength | Why it fits |
+| --- | --- | --- |
+| `epequeno/legal-entailment-deberta-v3-large` | Highest accuracy for legal contradiction | Fine-tuned on a lawyer-reviewed legal entailment benchmark. Labels: `entailed`, `partially_entailed`, `contradicted`, `neutral`. Achieves 96.9% F1 on `contradicted` claims and 95.8% overall accuracy. Built for citation/claim verification in legal documents. |
+| `nimamegh/roberta_cnn_legal` | LegalLens shared task winner | RoBERTa + CNN hybrid trained for legal NLI (entailment / neutral / contradiction). Good for general legal statement pairs. |
+| `Agreemind/contractnli-distilbert-nda` | Fastest / production-friendly | DistilBERT fine-tuned on ContractNLI. Smaller and faster, but domain-focused on contract provisions, not free-form testimony. |

@@ -344,6 +344,11 @@ So `calcNumericDelta` returns a **typed** result (`{ unit, value }`), and the sc
 | `distance` (km) | < 0.5 | < 5 | Sub-500m is rounding ("near the store" vs "at the store"); a few km gap suggests two different locations |
 | `weight` (kg) | < 1 | < 5 | Day-to-day weight fluctuation is normal under 1kg; a 5kg+ gap in self-reported weight is notable |
 | `height` (cm) | < 1 | < 3 | Height is highly stable; even small reported differences are usually measurement/rounding, but >3cm is odd |
+| `money` (dollars) | < 50 | < 500 | Small dollar differences are rounding or tip/fee confusion; a $500+ gap suggests entirely different transactions |
+| `duration` (minutes) | < 5 | < 30 | "A few minutes" vs "about five minutes" is noise; "a few minutes" vs "half an hour" is a real discrepancy |
+| `speed` (mph/kmh) | < 5 | < 20 | Under 5 units is normal estimation error; 20+ changes the narrative (e.g. "slow" vs highway speed) |
+| `occurrence` (count) | < 1 | < 3 | Off-by-one ("called twice" vs "three times") is human error; off-by-3+ suggests fabrication or a completely different event |
+| `percentage` (% points) | < 2 | < 10 | 2pp is rounding; 10pp+ materially changes ownership, liability, or share claims |
 
 ```ts
 const UNIT_THRESHOLDS: Record<NumericDeltaResult["unit"], { small: number; medium: number }> = {
@@ -529,21 +534,201 @@ function scoreContradiction(pair: Pair, llmType: LlmType): ScoreResult {
 
 ## End-to-end flow summary
 
+The example below walks the Marcus Webb depositions (from the prototype) through every stage.
+
+---
+
+### Input — two raw transcripts
+
+**T1 — March 14, 2023 deposition**
 ```
-Transcript 1 ──┐
-               ├─► Pass 1 (LLM) ─► claims_1
-Transcript 2 ──┘
-               ├─► Pass 1 (LLM) ─► claims_2
+Q: Where were you on the evening of November 3rd?
+A: I was at home all evening. I ordered pizza around 7pm and watched TV.
 
-claims_1 + claims_2 ─► Pass 2 (LLM) ─► candidate pairs (with llmType hint)
+Q: What time did you go to sleep?
+A: Around 10, maybe 10:30. I had work the next morning.
 
-candidate pairs ─► resolvePair() [plain code] ─► full Pair objects
+Q: Have you ever been to the Hargrove Street warehouse?
+A: No, never. I don't even know where that is.
 
-For each Pair:
-  scoreContradiction(pair, llmType) [plain code, NO LLM CALL]
-    ─► final { type, confidence, breakdown }
-
-Final results ─► UI (color-coded chips, confidence bars, raw quote highlights)
+Q: Had you met Daniel Cho before November 3rd?
+A: No. I'd never heard of him before this whole thing started.
 ```
 
-**The only two LLM calls in the entire pipeline are Pass 1 and Pass 2.** Everything after that — type finalization, confidence scoring, breakdown — is deterministic application code that can be unit-tested independently of the LLM.
+**T2 — September 9, 2023 deposition**
+```
+Q: Walk me through the evening of November 3rd again.
+A: I was home. I think I went out briefly to get some groceries, maybe around 7:30, but came right back.
+
+Q: What time did you go to sleep?
+A: It was late. Midnight maybe. I had trouble sleeping.
+
+Q: Had you ever visited the Hargrove Street area?
+A: I mean, I've driven through that part of town. I didn't say I'd never been in that general area.
+
+Q: And Daniel Cho — did you know him?
+A: I knew of him. We had mutual friends. I don't think I'd met him face to face.
+```
+
+---
+
+### Pass 1 — Claim Extraction (LLM, run twice in parallel)
+
+Each transcript is sent to Gemini independently. The LLM extracts atomic factual claims and groups them by topic.
+
+**Pass 1 output for T1:**
+```json
+{
+  "claims": [
+    { "id": "T1_C1", "topic": "location",     "text": "I was at home all evening",                       "raw_quote": "I was at home all evening. I ordered pizza around 7pm and watched TV." },
+    { "id": "T1_C2", "topic": "sleep_time",   "text": "Went to sleep around 10 or 10:30",                "raw_quote": "Around 10, maybe 10:30. I had work the next morning." },
+    { "id": "T1_C3", "topic": "hargrove",     "text": "Never been to Hargrove Street warehouse",         "raw_quote": "No, never. I don't even know where that is." },
+    { "id": "T1_C4", "topic": "daniel_cho",   "text": "Never met or heard of Daniel Cho before",         "raw_quote": "No. I'd never heard of him before this whole thing started." }
+  ]
+}
+```
+
+**Pass 1 output for T2:**
+```json
+{
+  "claims": [
+    { "id": "T2_C1", "topic": "location",     "text": "Went out briefly for groceries around 7:30",      "raw_quote": "I think I went out briefly to get some groceries, maybe around 7:30, but came right back." },
+    { "id": "T2_C2", "topic": "sleep_time",   "text": "Went to sleep around midnight",                   "raw_quote": "It was late. Midnight maybe. I had trouble sleeping." },
+    { "id": "T2_C3", "topic": "hargrove",     "text": "Has driven through the Hargrove Street area",     "raw_quote": "I've driven through that part of town. I didn't say I'd never been in that general area." },
+    { "id": "T2_C4", "topic": "daniel_cho",   "text": "Knew of Daniel Cho through mutual friends",       "raw_quote": "I knew of him. We had mutual friends. I don't think I'd met him face to face." }
+  ]
+}
+```
+
+---
+
+### Pass 2 — Candidate Pairing (LLM)
+
+Both claim lists are sent to Gemini together. The LLM matches claims that address the same topic and provides a type *hint* (`llmType`) — not a final verdict.
+
+**Pass 2 output:**
+```json
+{
+  "pairs": [
+    {
+      "topic": "location",
+      "claim_1_id": "T1_C1", "claim_2_id": "T2_C1",
+      "llmType": "direct",
+      "llm_explanation": "T1 claims Marcus was home all evening; T2 admits leaving briefly for groceries around 7:30 PM — directly contradicts 'all evening'."
+    },
+    {
+      "topic": "sleep_time",
+      "claim_1_id": "T1_C2", "claim_2_id": "T2_C2",
+      "llmType": "direct",
+      "llm_explanation": "T1 says he slept around 10–10:30 PM; T2 says midnight — a direct time conflict."
+    },
+    {
+      "topic": "hargrove",
+      "claim_1_id": "T1_C3", "claim_2_id": "T2_C3",
+      "llmType": "inferential",
+      "llm_explanation": "T1 claims no knowledge of Hargrove Street; T2 admits driving through the area — inferentially inconsistent."
+    },
+    {
+      "topic": "daniel_cho",
+      "claim_1_id": "T1_C4", "claim_2_id": "T2_C4",
+      "llmType": "direct",
+      "llm_explanation": "T1 says he'd never heard of Daniel Cho; T2 says he knew of him through mutual friends."
+    }
+  ]
+}
+```
+
+---
+
+### resolvePairs() — Join IDs to full Claim objects (pure code, no LLM)
+
+```json
+{
+  "topic": "location",
+  "claim_1": { "id": "T1_C1", "topic": "location", "text": "I was at home all evening",            "raw_quote": "I was at home all evening. I ordered pizza around 7pm and watched TV." },
+  "claim_2": { "id": "T2_C1", "topic": "location", "text": "Went out briefly for groceries around 7:30", "raw_quote": "I think I went out briefly to get some groceries, maybe around 7:30, but came right back." },
+  "llmType": "direct",
+  "llm_explanation": "T1 claims Marcus was home all evening; T2 admits leaving briefly for groceries around 7:30 PM."
+}
+```
+
+---
+
+### scoreContradiction() — Scoring Layer (pure code, NO LLM)
+
+Applied to each resolved pair. Example for the `location` pair:
+
+**Signal evaluation:**
+1. **numericDelta** — `calcNumericDelta` finds no comparable numeric pair (one claim has no parseable time in isolation) → `null`, skip
+2. **hasScopeWord** — `detectScopeQualifier("I was at home all evening")` → **true** (`"all"` matches `\ball\b`)
+3. → Rule 2 fires: `type = "direct"`, `confidence = assertionMin × 0.9 + 0.1`
+4. `assertionMin = min(calcAssertionStrength("I was at home all evening"), calcAssertionStrength("Went out briefly for groceries around 7:30"))` = `min(0.75, 0.50)` = `0.50`
+5. `confidence = 0.50 × 0.9 + 0.1 = 0.55`
+
+**Output:**
+```json
+{
+  "type": "direct",
+  "confidence": 0.55,
+  "breakdown": {
+    "lexicalOverlap": 0.40,
+    "numericDelta": null,
+    "assertionMin": 0.50,
+    "hasScopeWord": true
+  }
+}
+```
+
+---
+
+### Final ScoredContradiction (sent to UI)
+
+```json
+{
+  "topic": "location",
+  "type": "direct",
+  "confidence": 0.55,
+  "severity": "MEDIUM",
+  "claim1": "I was at home all evening. I ordered pizza around 7pm and watched TV.",
+  "claim2": "I think I went out briefly to get some groceries, maybe around 7:30, but came right back.",
+  "explanation": "T1 claims Marcus was home all evening; T2 admits leaving briefly for groceries around 7:30 PM — directly contradicts 'all evening'.",
+  "breakdown": {
+    "lexicalOverlap": 0.40,
+    "numericDelta": null,
+    "assertionMin": 0.50,
+    "hasScopeWord": true
+  }
+}
+```
+
+`severity` is derived from `confidence` and `type` by application code (no LLM):
+- `type === 'false_positive'` → `LOW`
+- `confidence ≥ 0.7` → `HIGH`
+- `confidence ≥ 0.4` → `MEDIUM` ← this case
+- else → `LOW`
+
+---
+
+### Pipeline summary
+
+```
+T1 (raw text) ──┐
+                ├─► Pass 1 (LLM, parallel) ─► claims_1
+T2 (raw text) ──┘
+                ├─► Pass 1 (LLM, parallel) ─► claims_2
+
+claims_1 + claims_2 ─► Pass 2 (LLM) ─► candidate pairs (llmType hint per pair)
+
+candidate pairs ─► resolvePairs() [plain code] ─► full ResolvedPair objects
+
+For each ResolvedPair:
+  scoreContradiction(pair, llmType) [plain code, NO LLM]
+    ─► { type, confidence, breakdown }
+  deriveSeverity(type, confidence) [plain code]
+    ─► severity
+
+─► ScoredContradiction[] ─► UI
+   (type badge, severity badge, confidence %, explanation, quote highlight)
+```
+
+**The only two LLM calls in the entire pipeline are Pass 1 (×2, parallel) and Pass 2.** Everything after — type finalization, confidence scoring, severity derivation, breakdown — is deterministic application code that can be unit-tested independently of the LLM.
